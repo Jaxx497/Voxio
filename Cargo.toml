@@ -1,0 +1,19 @@
+[package]
+name = "voxio"
+version = "0.1.2"
+edition = "2024"
+authors = ["Jaxx497"]
+description = "A lightweight audio playback engine"
+license = "MIT"
+repository = "https://github.com/Jaxx497/Voxio/"
+keywords = ["music", "audio", "player" ]
+categories = ["multimedia::audio"]
+
+[dependencies]
+cpal = "0.17.3"
+crossbeam = "0.8.4"
+rtrb = "0.3.2"
+rubato = "2.0.0"
+symphonia = { version = "0.5.5", features = ["aac", "alac", "isomp4", "mp3" ] }
+symphonia-adapter-libopus = "0.2.6"
+thiserror = "2.0.18"
