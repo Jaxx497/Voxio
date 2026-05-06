@@ -1,7 +1,10 @@
-## Current Changes
+# Changelog
 
-### Added
+## [0.1.4]
+
+#### Added
  - Proper documentation for crates.io
 
-### Fixed
+#### Fixed
  - Stability improvements for webm files
+ - Pause command occasionally overwridden

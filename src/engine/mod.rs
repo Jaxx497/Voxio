@@ -169,6 +169,7 @@ impl Vox {
         self.state.start_seek();
         self.state.reset_samples();
         self.state.set_active(true);
+        self.state.set_paused(false);
 
         self.commands
             .send(VoxCommand::Play(path.to_string_lossy().to_string()))

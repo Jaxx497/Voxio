@@ -314,7 +314,6 @@ impl VoxWorker {
                 self.current = Some(decoder);
 
                 self.state.set_active(true);
-                self.state.set_paused(false);
 
                 // Prefill the ring buffer before unblocking the audio callback
                 let current_generation = self.state.seek_generation();
