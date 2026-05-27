@@ -296,17 +296,8 @@ impl VoxWorker {
             Ok(decoder) => {
                 let info = &decoder.info;
 
-                // Store playable duration (excluding encoder delay/padding)
-                if let Some(duration) = decoder.playable_duration() {
-                    self.state.set_duration_secs(duration);
-                } else {
-                    // Fallback to n_frames-based duration if available
-                    let fallback = info
-                        .n_frames
-                        .map(|n| n as f64 / info.sample_rate as f64)
-                        .unwrap_or(0.0);
-                    self.state.set_duration_secs(fallback);
-                }
+                self.state
+                    .set_duration_secs(decoder.playable_duration().unwrap_or(0.0));
 
                 self.input_channels = info.channels;
                 self.resampler =
@@ -357,15 +348,7 @@ impl VoxWorker {
             }
         };
 
-        let info = &decoder.info;
-        let sample_rate = info.sample_rate;
-
-        // Use playable duration (excludes encoder delay/padding) to match
-        // what the UI reports — seeking to the displayed end triggers track end cleanly.
-        let duration = decoder
-            .playable_duration()
-            .or_else(|| info.n_frames.map(|n| n as f64 / sample_rate as f64))
-            .unwrap_or(f64::MAX);
+        let duration = decoder.playable_duration().unwrap_or(f64::MAX);
 
         if target_secs >= duration {
             self.state.finish_seek();
@@ -374,12 +357,13 @@ impl VoxWorker {
 
         let target_secs = target_secs.max(0.0);
 
-        // Seek (returns actual sample position)
-        let actual_ts = match decoder.seek(target_secs) {
-            Ok(ts) => ts,
-            Err(e) => {
+        let actual_secs = match decoder.seek(target_secs) {
+            Ok(secs) => secs,
+            Err(_) => {
+                // Seek failed even after reopen retry. The target is unreachable
+                // (past end of stream). Treat as track end.
                 self.state.finish_seek();
-                return Err(e);
+                return self.handle_track_end();
             }
         };
 
@@ -389,8 +373,6 @@ impl VoxWorker {
             r.reset();
         }
 
-        let input_rate = sample_rate as f64;
-        let actual_secs = actual_ts as f64 / input_rate;
         let output_samples =
             (actual_secs * self.output_rate as f64 * self.output_channels as f64) as u64;
 
