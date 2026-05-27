@@ -95,14 +95,15 @@ impl VoxDecoder {
         let padding_samples = codec_params.padding.unwrap_or(0) as u64;
         // n_frames may be in container timestamp units rather than PCM frames
         // (e.g. WebM stores duration in milliseconds). Convert via time_base if available.
-        let total_samples = codec_params.n_frames.map(|n| {
-            match (codec_params.time_base, metadata_sample_rate) {
-                (Some(tb), Some(sr)) => {
-                    (n as f64 * tb.numer as f64 / tb.denom as f64 * sr as f64) as u64
-                }
-                _ => n,
-            }
-        });
+        let total_samples =
+            codec_params
+                .n_frames
+                .map(|n| match (codec_params.time_base, metadata_sample_rate) {
+                    (Some(tb), Some(sr)) => {
+                        (n as f64 * tb.numer as f64 / tb.denom as f64 * sr as f64) as u64
+                    }
+                    _ => n,
+                });
 
         let (sample_rate, channels) = if metadata_complete {
             (metadata_sample_rate.unwrap(), metadata_channels.unwrap())
@@ -132,7 +133,7 @@ impl VoxDecoder {
 
             // Seek back to beginning after probing
             let _ = format.seek(
-                SeekMode::Coarse,
+                SeekMode::Accurate,
                 SeekTo::Time {
                     time: Time::from(0.0),
                     track_id: Some(track_id),
