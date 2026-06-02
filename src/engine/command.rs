@@ -21,6 +21,7 @@ pub enum SeekPosition {
 pub(crate) enum VoxCommand {
     Play(String),
     QueueNext(String),
+    ClearNext,
     Seek(SeekPosition),
     Stop,
     Shutdown,
@@ -108,6 +109,7 @@ impl VoxWorker {
         match cmd {
             VoxCommand::Play(path) => self.handle_play(path)?,
             VoxCommand::QueueNext(next) => self.queue_next(next)?,
+            VoxCommand::ClearNext => self.next = None,
             VoxCommand::Stop => self.stop_playback(),
             VoxCommand::Shutdown => return Ok(true),
             _ => (),

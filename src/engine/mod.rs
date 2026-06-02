@@ -201,6 +201,17 @@ impl Vox {
         Ok(())
     }
 
+    /// Clear any track previously set via [`set_next`](Self::set_next), so that
+    /// nothing is played after the current track finishes.
+    ///
+    /// Unlike `set_next`, this uses a blocking send: a clear must not be dropped,
+    /// otherwise a track the caller intended to discard could still play.
+    pub fn clear_next(&mut self) -> Result<()> {
+        self.commands
+            .send(VoxCommand::ClearNext)
+            .map_err(|_| VoxError::Output("Channel closed".into()))
+    }
+
     pub fn seek_to(&mut self, pos: f64) -> Result<()> {
         if !self.state.is_active() {
             return Ok(());

@@ -9,8 +9,8 @@ use symphonia::{
         audio::{Channels, Position},
         codecs::{
             audio::{
-                AudioDecoder as SymphoniaDecoder, AudioDecoderOptions,
-                well_known::CODEC_ID_OPUS, CODEC_ID_NULL_AUDIO,
+                AudioDecoder as SymphoniaDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO,
+                well_known::CODEC_ID_OPUS,
             },
             registry::CodecRegistry,
         },
@@ -89,8 +89,9 @@ impl VoxDecoder {
         let decoder_params =
             if audio_params.codec == CODEC_ID_OPUS && audio_params.channels.is_none() {
                 let mut params = audio_params.clone();
-                params.channels =
-                    Some(Channels::Positioned(Position::FRONT_LEFT | Position::FRONT_RIGHT));
+                params.channels = Some(Channels::Positioned(
+                    Position::FRONT_LEFT | Position::FRONT_RIGHT,
+                ));
                 params
             } else {
                 audio_params.clone()
@@ -255,8 +256,9 @@ impl VoxDecoder {
         let decoder_params =
             if audio_params.codec == CODEC_ID_OPUS && audio_params.channels.is_none() {
                 let mut params = audio_params.clone();
-                params.channels =
-                    Some(Channels::Positioned(Position::FRONT_LEFT | Position::FRONT_RIGHT));
+                params.channels = Some(Channels::Positioned(
+                    Position::FRONT_LEFT | Position::FRONT_RIGHT,
+                ));
                 params
             } else {
                 audio_params.clone()
@@ -285,7 +287,12 @@ fn open_format_reader(p: &str) -> Result<Box<dyn FormatReader>> {
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let probed = get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|e| VoxError::Decoder(e.to_string()))?;
 
     Ok(probed)
