@@ -1,19 +1,31 @@
 [package]
 name = "voxio"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.89"
 authors = ["Jaxx497"]
-description = "A lightweight audio playback engine"
+description = "A lightweight audio playback library"
 license = "MIT"
 repository = "https://github.com/Jaxx497/Voxio/"
 keywords = ["music", "audio", "player" ]
 categories = ["multimedia::audio"]
+exclude = ["tests/"]
 
 [dependencies]
-cpal = "0.17.3"
-crossbeam = "0.8.4"
-rtrb = "0.3.2"
-rubato = "2.0.0"
-symphonia = { version = "0.6.0", features = ["aac", "alac", "isomp4", "mp3" ] }
-symphonia-adapter-libopus = "0.3.0"
+cpal =  "0.18.1" 
+crossbeam-channel = "0.5.15"
+rtrb = "0.3.4"
+rubato = "3.0.0"
+symphonia = { version = "0.6.0", features = [ "aac", "aiff", "alac", "isomp4", "mp3" ] }
+symphonia-adapter-libopus = { version = "0.3.0", optional = true }
 thiserror = "2.0.18"
+
+[features]
+default = ["opus"]
+opus = ["dep:symphonia-adapter-libopus"]
+
+[dev-dependencies]
+crossterm = "0.29.0"
+
+[profile.dev.package."*"]
+opt-level = 3

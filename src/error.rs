@@ -1,24 +1,33 @@
-use thiserror::{self, Error};
+use thiserror::Error;
 
-#[derive(Error, Debug)]
+/// Errors that can occur during playback, decoding, seeking, or device I/O.
+#[derive(Clone, Error, Debug, PartialEq)]
 pub enum VoxError {
-    /// File could not be opened
+    /// The file could not be opened or is not a regular file.
     #[error("Failed to open file: {0}")]
     FileOpen(String),
 
-    // Audio output error
+    /// The output device could not be opened or rebuilt.
     #[error("output error: {0}")]
-    Output(String),
+    Device(String),
 
+    /// The track could not be decoded.
     #[error("decoder error: {0}")]
     Decoder(String),
 
+    /// Resampling to the output rate failed.
     #[error("resampler error: {0}")]
     Resampler(String),
 
+    /// A seek could not be completed.
     #[error("seek error: {0}")]
     Seek(String),
 
+    /// No active track to queue after; the engine is idle.
+    #[error("no active track to queue after")]
+    NotActive,
+
+    /// The engine has shut down and no longer accepts commands.
     #[error("Vox channel closed")]
     ChannelClosed,
 }
