@@ -4,6 +4,7 @@ use crate::{
     event::{EndReason, StartReason, VoxEvent},
     output::AudioBinding,
     resampler::VoxResampler,
+    scan,
     state::SharedState,
 };
 use crossbeam_channel::{Receiver, RecvTimeoutError, Select, Sender, TryRecvError};
@@ -87,6 +88,9 @@ struct VoxWorker {
     deferred_next: Option<String>,
     rg_mode: ReplayGainMode,
     gain: f32,
+    /// Set by any seek on the current track. A seek invalidates the decoder's
+    /// `frames_emitted` tally, so end-of-track duration reconciliation is skipped.
+    seeked: bool,
 }
 
 pub(crate) fn spawn(
@@ -129,6 +133,7 @@ impl VoxWorker {
             deferred_next: None,
             rg_mode: ReplayGainMode::default(),
             gain: 1.0,
+            seeked: false,
         }
     }
 
@@ -171,6 +176,22 @@ impl VoxWorker {
 
     fn emit(&self, event: VoxEvent) {
         let _ = self.events.try_send(event);
+    }
+
+    /// Mark a freshly-started track: clear the seek flag, bump the epoch (drops a
+    /// prior track's in-flight scan), and scan for the true length if the reported
+    /// duration is only an estimate.
+    fn begin_track(&mut self, decoder: &VoxDecoder) {
+        self.seeked = false;
+        let epoch = self.state.bump_track_epoch();
+        if decoder.duration_estimated() {
+            scan::spawn(
+                decoder.path().to_string(),
+                epoch,
+                Arc::clone(&self.state),
+                self.events.clone(),
+            );
+        }
     }
 
     fn set_paused(&mut self, val: bool) {
@@ -366,6 +387,7 @@ impl VoxWorker {
                 let duration = decoder.playable_duration().unwrap_or(0.0);
 
                 self.state.set_duration_secs(duration);
+                self.begin_track(&decoder);
                 self.input_channels = info.channels;
                 self.resampler =
                     VoxResampler::new(info.sample_rate, self.output_rate, info.channels)?;
@@ -433,6 +455,7 @@ impl VoxWorker {
     }
 
     fn handle_seek(&mut self, target_secs: f64) -> Result<()> {
+        self.seeked = true;
         self.state.start_seek();
 
         let (duration, input_rate, preroll_frames) = match &self.current {
@@ -468,8 +491,8 @@ impl VoxWorker {
         let decoder = self.current.as_mut().unwrap();
         let codec = decoder.info.codec;
 
-        let actual_secs = match decoder.seek(target_secs) {
-            Ok(secs) => secs,
+        let landing = match decoder.seek(target_secs) {
+            Ok(l) => l,
             Err(e) => {
                 self.emit(VoxEvent::Error {
                     error: e,
@@ -483,17 +506,23 @@ impl VoxWorker {
         // Lossy codecs need ~one frame of warm-up after a coarse seek to
         // reconverge; PCM-class codecs land exactly at target with no warm-up,
         // so skipping any frames just discards real audio and offsets position.
-        let warmup = if matches!(
-            codec,
-            CODEC_ID_OPUS | CODEC_ID_VORBIS | CODEC_ID_MP3 | CODEC_ID_AAC
-        ) {
-            (input_rate as u64 * SEEK_POST_SKIP_MS as u64) / 1000
+        // The linear-decode fallback (`needs_warmup == false`) already decoded
+        // continuously up to the target, so it needs neither warm-up nor preroll.
+        let skip_frames = if landing.needs_warmup {
+            let warmup = if matches!(
+                codec,
+                CODEC_ID_OPUS | CODEC_ID_VORBIS | CODEC_ID_MP3 | CODEC_ID_AAC
+            ) {
+                (input_rate as u64 * SEEK_POST_SKIP_MS as u64) / 1000
+            } else {
+                0
+            };
+            warmup.max(preroll_frames)
         } else {
             0
         };
-        let skip_frames = warmup.max(preroll_frames);
         let skipped = self.current.as_mut().unwrap().skip_samples(skip_frames)?;
-        let actual_secs = actual_secs + skipped as f64 / input_rate as f64;
+        let actual_secs = landing.secs + skipped as f64 / input_rate as f64;
 
         self.pending.clear();
         if let Some(r) = &mut self.resampler {
@@ -514,14 +543,6 @@ impl VoxWorker {
             return Ok(());
         };
         let packet = decoder.next_packet().map(|opt| opt.map(|s| s.to_vec()));
-        let recovered = decoder.take_recovered();
-
-        for msg in recovered {
-            self.emit(VoxEvent::Error {
-                error: VoxError::Decoder(msg),
-                recoverable: true,
-            });
-        }
 
         match packet? {
             Some(s) => self.process_samples(&s),
@@ -554,7 +575,23 @@ impl VoxWorker {
         Ok(())
     }
 
+    /// At end of stream, reconcile the reported duration against what actually
+    /// decoded — the reactive counterpart to the background scan, catching files
+    /// that ended short of their stated length (truncated or over-tagged). Skipped
+    /// after a seek, when `frames_emitted` is no longer the true length.
+    fn reconcile_duration(&self) {
+        if self.seeked {
+            return;
+        }
+        let Some(decoder) = self.current.as_ref() else {
+            return;
+        };
+        let secs = decoder.frames_emitted() as f64 / decoder.info.sample_rate.max(1) as f64;
+        scan::publish_correction(&self.state, &self.events, decoder.path().into(), secs);
+    }
+
     fn handle_track_end(&mut self) -> Result<()> {
+        self.reconcile_duration();
         self.state.reset_samples();
         let ended = self.current.take().map(|d| PathBuf::from(d.path()));
 
@@ -601,6 +638,7 @@ impl VoxWorker {
         let path = PathBuf::from(queued.decoder.path());
 
         self.state.set_duration_secs(duration);
+        self.begin_track(&queued.decoder);
         self.input_channels = queued.input_channels;
         self.current = Some(queued.decoder);
         self.update_gain();
@@ -687,6 +725,7 @@ impl VoxWorker {
     }
 
     fn stop_playback(&mut self) {
+        self.state.bump_track_epoch(); // invalidate any in-flight duration scan
         self.state.reset_samples();
         self.state.set_active(false);
         self.state.finish_seek();

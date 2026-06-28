@@ -60,10 +60,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   more for instant UI reactions.
 - **Visualization tap** — A lock-free sample tap for meters, waveforms, and FFT
   displays.
+- **Blazingly Fast Waveform Generation** — Decode entire files into per-bucket
+  amplitudes (RMS or peak) with optional high-pass and treble shaping.** 
 - **Stays out of your way** — All audio work runs on its own threads behind a
   `Send` handle. Control it from anywhere; drop it to shut down cleanly.
 
-> ***Note:** Opus is feature gated, but enabled by default
+> **\*** Opus is feature gated, but enabled by default \
+>  ** Waveform is feature gated, disabled by default
 
 ## What Voxio is Not
 
@@ -79,14 +82,28 @@ meter cargo run --example interactive -- song.mp3
 
 # Gapless transition demo
 cargo run --example gapless -- track1.flac track2.flac
+
+# Draw and tune a waveform
+cargo run --example draw_waveform --features waveform -- track1.ogg 
 ```
 
 ## Feature flags
 
-**Opus** support is enabled by default. Drop it if you don't need it:
+| Feature    | Default | Description |
+|------------|---------|-------------|
+| `opus`     | yes     | Opus decoding via `symphonia-adapter-libopus` |
+| `waveform` | no      | Offline waveform extraction (`voxio::waveform`) |
+
+Disable default features to opt out of Opus:
 
 ```toml
 voxio = { version = "0.2", default-features = false }
+```
+
+Enable `waveform` explicitly:
+
+```toml
+voxio = { version = "0.2", features = ["waveform"] }
 ```
 
 ## Disclaimer

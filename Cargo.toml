@@ -1,6 +1,6 @@
 [package]
 name = "voxio"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Jaxx497"]
@@ -23,9 +23,17 @@ thiserror = "2.0.18"
 [features]
 default = ["opus"]
 opus = ["dep:symphonia-adapter-libopus"]
+# Waveform extraction (`voxio::waveform`). Opt-in; adds no dependencies.
+waveform = []
 
 [dev-dependencies]
 crossterm = "0.29.0"
+ratatui = "0.30.2"
+
+# Interactive voxio waveform viewer; needs the feature.
+[[example]]
+name = "draw_waveform"
+required-features = ["waveform"]
 
 [profile.dev.package."*"]
 opt-level = 3

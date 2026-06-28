@@ -32,10 +32,15 @@ mod error;
 mod event;
 mod output;
 mod resampler;
+mod scan;
 mod state;
 mod tap;
 mod watchdog;
+#[cfg(feature = "waveform")]
+mod waveform;
 
+#[cfg(feature = "waveform")]
+pub use crate::waveform::{BinMetric, Waveform, WaveformOptions};
 use crate::{
     command::{SeekPosition, VoxCommand},
     error::Result,
@@ -732,6 +737,114 @@ mod tests {
         assert!(
             (7.9..8.2).contains(&pos),
             "second seek: expected ~8.0, got {pos}"
+        );
+    }
+
+    /// A truncated copy of `sine.flac`: it opens fine (STREAMINFO is intact, so its
+    /// reported duration is the full ~2 s) but decodes well short of that, so a
+    /// full playthrough triggers end-of-track duration reconciliation down to
+    /// ~0.84 s. Unique path per `tag` so parallel tests don't clash.
+    fn truncated_flac(tag: &str) -> std::path::PathBuf {
+        let full = std::fs::read("tests/test_suite/sine.flac").unwrap();
+        let cut = full.len() * 60 / 100;
+        let path = std::env::temp_dir().join(format!("voxio_trunc_{tag}.flac"));
+        std::fs::write(&path, &full[..cut]).unwrap();
+        path
+    }
+
+    /// Drain the engine to idle, reporting whether any `DeviceChanged` (stream
+    /// rebind) was observed along the way. A rebind re-seeks to hold position,
+    /// which sets the same `seeked` flag a user seek does and so legitimately
+    /// suppresses end-of-track duration reconciliation. The WSLg test backend
+    /// emits spurious rebinds, so reconcile-must-fire assertions skip when one is
+    /// seen — on a stable backend none fire and the assertion holds.
+    fn drain_to_idle_watching_rebinds(v: &Vox, events: &VoxEvents) -> bool {
+        let mut rebound = false;
+        let start = Instant::now();
+        while !v.is_active() && start.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            while let Some(e) = events.try_recv() {
+                if matches!(e, VoxEvent::DeviceChanged { .. }) {
+                    rebound = true;
+                }
+            }
+            if !v.is_active() || Instant::now() > deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        rebound
+    }
+
+    #[test]
+    fn truncated_track_resolves_duration() {
+        // A track that decodes short of its reported length should have its
+        // duration reconciled downward when it ends.
+        let (v, events) = fresh_vox();
+        let path = truncated_flac("resolve");
+        v.play(path.to_str().unwrap()).unwrap();
+
+        if drain_to_idle_watching_rebinds(&v, &events) {
+            return; // a rebind re-seeked and correctly suppressed reconciliation
+        }
+        let resolved = v.duration().as_secs_f64();
+        assert!(
+            resolved < 1.5,
+            "duration should reconcile below the 2s estimate, got {resolved}"
+        );
+    }
+
+    #[test]
+    fn seek_suppresses_duration_reconcile() {
+        // A seek invalidates the frames-decoded tally, so end-of-track
+        // reconciliation must be skipped — the reported duration must stand rather
+        // than be overwritten with a partial value. (Robust regardless of rebinds:
+        // both a user seek and a rebind-seek suppress, so the duration stays ~2s.)
+        let (v, events) = fresh_vox();
+        let path = truncated_flac("seek_suppress");
+        v.play(path.to_str().unwrap()).unwrap();
+        await_event_ignoring_device(&events); // TrackStarted
+
+        v.seek_to(0.3);
+        await_seek(&v, 0.3);
+        drain_to_idle_watching_rebinds(&v, &events);
+
+        let reported = v.duration().as_secs_f64();
+        assert!(
+            (1.5..2.5).contains(&reported),
+            "a seek must suppress reconciliation; duration should remain ~2s, got {reported}"
+        );
+    }
+
+    #[test]
+    fn gapless_after_seek_resolves_next_duration() {
+        // The `seeked` flag lives on the worker, not the decoder. A seek on the
+        // first track must not leak into the gapless handoff, or the next track's
+        // reconciliation would be wrongly suppressed. Seeking past the end of the
+        // first track both sets the flag and triggers the handoff; the truncated
+        // next track must then still reconcile its own (shorter) duration.
+        let (v, events) = fresh_vox();
+        let b = truncated_flac("gapless_next");
+        v.play(LEGAL_FILE).unwrap();
+        await_event_ignoring_device(&events); // TrackStarted(Play)
+
+        v.set_next(b.to_str().unwrap()).unwrap();
+        await_event_ignoring_device(&events); // NextReady
+
+        let dur = v.duration();
+        v.seek_to(dur.as_secs_f64() + 1.0); // sets `seeked`, triggers gapless handoff
+
+        if drain_to_idle_watching_rebinds(&v, &events) {
+            return; // a rebind re-seeked the next track and suppressed reconcile
+        }
+        let resolved = v.duration().as_secs_f64();
+        assert!(
+            resolved < 1.5,
+            "next track must reconcile after a seek-triggered gapless handoff \
+             (seeked flag must reset); duration is {resolved}"
         );
     }
 }

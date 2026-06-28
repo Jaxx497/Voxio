@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.1] - Decoder Improvements + Waveform Module
+
+*Lots of little tunings + a new waveform bins generation feature*
+
+#### Added:
+  - New (optional) waveform bin generation module
+  - draw_waveform example added to example suite
+  - Improved seeking logic
+  - DurationResolved type reporting back sample-accurate durations
+
+#### Fixed:
+  - Provide better handling for files with invalid or missing headers
+  - More decoder resilience against poorly encoded files
+  - Removed hardcoded grace period for bad packets to recover from
+  - Provide event to correct durations that were calcualated improperly due
+    invalid or missing headers
+  - Corrupt packets at end of file end playback with EOF event instead of error
+  - Removed recoverable decoder error events; errors are now silently retried
+    internally
+  - Ensure that no division by 0 errors can ever occur
+
+
 ## [0.2.0] - Complete rewrite
 ### Voxio has been rewritten from the ground up.
 

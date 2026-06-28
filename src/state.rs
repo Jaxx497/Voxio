@@ -9,6 +9,7 @@ pub(crate) struct SharedState {
     seek_epoch: AtomicU64,     // bumped per seek; pairs with seek_ack
     seek_ack: AtomicU64,       // callback's "I drained the stale audio" signal
     duration_micros: AtomicU64,
+    track_epoch: AtomicU64,    // bumped per track; invalidates stale duration scans
     callback_count: AtomicU64, // heartbeat — the watchdog reads this
     rebuilding: AtomicBool,    // stream is being rebuilt
     shutdown: AtomicBool,
@@ -84,6 +85,18 @@ impl SharedState {
     pub(crate) fn set_duration_secs(&self, secs: f64) {
         let micros = (secs * 1_000_000.0) as u64;
         self.duration_micros.store(micros, Ordering::Release);
+    }
+
+    /// Mark a new track as current, returning its epoch. A duration scan applies
+    /// its result only while the epoch still matches, so a track change or stop
+    /// discards an in-flight scan.
+    pub(crate) fn bump_track_epoch(&self) -> u64 {
+        self.track_epoch.fetch_add(1, Ordering::Release) + 1
+    }
+
+    /// Current track epoch.
+    pub(crate) fn track_epoch(&self) -> u64 {
+        self.track_epoch.load(Ordering::Acquire)
     }
 
     /// Record the live output format; called by the supervisor on (re)build

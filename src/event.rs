@@ -15,10 +15,7 @@ pub enum VoxEvent {
         reason: StartReason,
     },
     /// Always emitted *before* `is_active()` turns false.
-    TrackEnded {
-        path: PathBuf,
-        reason: EndReason,
-    },
+    TrackEnded { path: PathBuf, reason: EndReason },
     /// Engine idle. Nothing playing, nothing queued.
     Stopped,
     /// A `set_next` call was successful.
@@ -28,11 +25,12 @@ pub enum VoxEvent {
         sample_rate: u32,
         channels: usize,
     },
+    /// A more accurate duration replaced the initial estimate (a headerless MP3
+    /// resolved by a background scan, or a track that decoded short of its
+    /// reported length). [`Vox::duration`](crate::Vox::duration) reflects it.
+    DurationResolved { path: PathBuf, duration: Duration },
     /// An error occurred. `recoverable` is `true` if playback continues.
-    Error {
-        error: VoxError,
-        recoverable: bool,
-    },
+    Error { error: VoxError, recoverable: bool },
     /// The output stream was rebuilt against a (possibly new) device.
     DeviceChanged {
         name: String,
@@ -41,13 +39,9 @@ pub enum VoxEvent {
         reason: RebindReason,
     },
     /// A rebuild failed; the engine keeps retrying.
-    DeviceLost {
-        name: String,
-    },
+    DeviceLost { name: String },
     /// Playback was paused or resumed.
-    StateChanged {
-        paused: bool,
-    },
+    StateChanged { paused: bool },
 }
 
 /// Why the output stream was rebuilt.
