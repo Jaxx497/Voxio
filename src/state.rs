@@ -9,10 +9,10 @@ pub(crate) struct SharedState {
     seek_epoch: AtomicU64,     // bumped per seek; pairs with seek_ack
     seek_ack: AtomicU64,       // callback's "I drained the stale audio" signal
     duration_micros: AtomicU64,
-    track_epoch: AtomicU64,    // bumped per track; invalidates stale duration scans
+    track_epoch: AtomicU64, // bumped per track; invalidates stale duration scans
     callback_count: AtomicU64, // heartbeat — the watchdog reads this
-    rebuilding: AtomicBool,    // stream is being rebuilt
-    rebuild_gen: AtomicU64,    // bumped per completed (re)build; watchdog re-baselines on change
+    rebuilding: AtomicBool, // stream is being rebuilt
+    rebuild_gen: AtomicU64, // bumped per completed (re)build; watchdog re-baselines on change
     shutdown: AtomicBool,
     output_rate: AtomicU32,
     output_channels: AtomicUsize,
@@ -22,7 +22,8 @@ pub(crate) struct SharedState {
 /// Perceptual → linear-gain taper. A raw multiply is linear gain, which sounds
 /// abrupt at low fader positions; a square law approximates the ear's response,
 /// so equal slider steps feel like equal loudness steps. Unity (1.0) maps to
-/// unity gain; the 1.2 max maps to ~1.44 linear (mild amplification, may clip).
+/// unity gain; the 1.5 max maps to 2.25 linear (+7 dB), which clips hot material
+/// — the output callback hard-clips to [-1, 1] so those peaks stay well-defined.
 fn volume_to_gain(v: f32) -> f32 {
     v * v
 }
@@ -119,16 +120,16 @@ impl SharedState {
     //      Volume
     // ======================
 
-    /// Current volume on the caller-facing perceptual scale (`0.0..=1.2`), i.e.
+    /// Current volume on the caller-facing perceptual scale (`0.0..=1.5`), i.e.
     /// the last value passed to [`set_volume`](Self::set_volume).
     pub(crate) fn volume(&self) -> f32 {
         f32::from_bits(self.volume.load(Ordering::Relaxed))
     }
 
-    /// Set the perceptual volume, clamped to `0.0..=1.2`. Read live by the audio
+    /// Set the perceptual volume, clamped to `0.0..=1.5`. Read live by the audio
     /// callback, so it takes effect immediately (even while paused).
     pub(crate) fn set_volume(&self, v: f32) {
-        let clamped = v.clamp(0.0, 1.2);
+        let clamped = v.clamp(0.0, 1.5);
         self.volume.store(clamped.to_bits(), Ordering::Relaxed);
     }
 
@@ -275,7 +276,8 @@ mod tests {
         assert_eq!(s.volume_gain(), 0.0);
 
         s.set_volume(5.0); // above range
-        assert_eq!(s.volume(), 1.2);
+        assert_eq!(s.volume(), 1.5);
+        assert!((s.volume_gain() - 2.25).abs() < 1e-6); // max maps to +7 dB
 
         s.set_volume(0.5);
         assert!((s.volume_gain() - 0.25).abs() < 1e-6); // square-law taper

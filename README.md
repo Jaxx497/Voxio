@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## What Voxio is Not
 
 - Not capable of playing multiple sources together
-- Not capable of augmenting playback (volume, speed, etc)
+- Not capable of altering playback speed or pitch
 - Not designed to play sound from online sources (subject to change??)
 
 ## Examples

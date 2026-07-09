@@ -303,7 +303,10 @@ fn build_stream(
                             fade_remaining -= 1;
                         }
                         current_gain += (target_gain - current_gain) * vol_coeff;
-                        sample *= current_gain;
+                        // Boost above unity can push peaks past the DAC's ±1.0
+                        // range; hard-clip so the device (and the tap) only ever
+                        // see well-defined samples.
+                        sample = (sample * current_gain).clamp(-1.0, 1.0);
                         data[i] = sample;
                     }
                     chunk.commit_all();

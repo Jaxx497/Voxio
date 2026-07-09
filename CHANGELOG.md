@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.3] - Volume Adjuster & Example Fixes
+
+*Minor fixes for the recently implemented volume adjustment.*
+
+### Changed:
+  - Raised volume ceiling from 1.2 to 1.5 (~+7 dB) on the perceptual scale
+  - Boosted peaks are now hard-clipped to [-1, 1] before reaching the
+    output device and visualization tap
+
+### Fixed:
+  - Removed file logging (event + panic logs) from the interactive example
+
 ## [0.2.2] - Volume Adjusters
 ### Added:
   - Volume adjustment

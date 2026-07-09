@@ -263,11 +263,12 @@ impl Vox {
         self.dispatch(VoxCommand::ReplayGain(mode));
     }
 
-    /// Sets the output volume on a perceptual scale, clamped to `0.0..=1.2`.
+    /// Sets the output volume on a perceptual scale, clamped to `0.0..=1.5`.
     ///
-    /// `0.0` is silence, `1.0` is unity (unchanged), and values up to `1.2`
-    /// amplify (which may clip). The scale is perceptual — a square-law taper is
-    /// applied internally so equal steps sound like equal loudness changes.
+    /// `0.0` is silence, `1.0` is unity (unchanged), and values up to `1.5`
+    /// amplify (up to +7 dB; peaks past the output's range are hard-clipped). The
+    /// scale is perceptual — a square-law taper is applied internally so equal
+    /// steps sound like equal loudness changes.
     ///
     /// Takes effect immediately, even while paused, and is smoothed over a few
     /// milliseconds to avoid clicks. The volume also scales the visualization
@@ -276,7 +277,7 @@ impl Vox {
         self.state.set_volume(volume);
     }
 
-    /// Returns the current volume on the perceptual `0.0..=1.2` scale — the last
+    /// Returns the current volume on the perceptual `0.0..=1.5` scale — the last
     /// value passed to [`set_volume`](Self::set_volume) (clamped). Defaults to `1.0`.
     pub fn volume(&self) -> f32 {
         self.state.volume()

@@ -16,9 +16,8 @@
 
 use std::collections::VecDeque;
 use std::env;
-use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::{
     cursor,
@@ -30,7 +29,7 @@ use voxio::{TapHandle, Vox};
 
 const SEEK_STEP: f64 = 5.0;
 const VOLUME_STEP: f32 = 0.05;
-const VOLUME_MAX: f32 = 1.2; // matches Vox::set_volume's clamp ceiling
+const VOLUME_MAX: f32 = 1.5; // matches Vox::set_volume's clamp ceiling
 const LOG_LINES: usize = 10;
 const BAR_WIDTH: usize = 40;
 
@@ -40,18 +39,11 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|| "tests/test_suite/Preludes, Op. 28 - No. 16 'Hades'.mp3".to_string());
 
     // Capture panics from any thread (engine threads run in the background) before
-    // the alternate screen eats them: restore the terminal and persist to a file.
+    // the alternate screen eats them: restore the terminal so the message is visible.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(io::stdout(), cursor::Show, terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
-        if let Ok(mut f) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("voxio_panic.log")
-        {
-            let _ = writeln!(f, "PANIC: {info}");
-        }
         default_hook(info);
     }));
 
@@ -77,16 +69,6 @@ fn run(
 ) -> io::Result<()> {
     let mut log: VecDeque<String> = VecDeque::new();
     let mut out = io::stdout();
-
-    // Durable event log — the TUI pane scrolls unplug-bursts off-screen. Truncated each run.
-    const LOG_PATH: &str = "voxio_events.log";
-    let mut logfile = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(LOG_PATH)
-        .ok();
-    let start = Instant::now();
 
     loop {
         // Keyboard input
@@ -128,13 +110,9 @@ fn run(
             }
         }
 
-        // Engine events → log pane (and durable log file)
+        // Engine events → log pane
         while let Some(event) = events.try_recv() {
             let line = format!("{event:?}");
-            if let Some(f) = logfile.as_mut() {
-                let _ = writeln!(f, "[{:9.3}s] {line}", start.elapsed().as_secs_f64());
-                let _ = f.flush();
-            }
             log.push_back(line);
             if log.len() > LOG_LINES {
                 log.pop_front();
