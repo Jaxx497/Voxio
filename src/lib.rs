@@ -86,6 +86,7 @@ impl Vox {
     /// watchdog threads. Returns a [`Vox`] handle and an [`VoxEvents`] receiver.
     fn init(config: VoxConfig) -> Result<(Vox, VoxEvents)> {
         let state = Arc::new(SharedState::default());
+        state.set_volume(1.0); // default is unity; SharedState::default() alone is silence
 
         let (cmd_tx, cmd_rx) = crossbeam_channel::bounded(CHANNEL_COUNT);
         let (event_tx, event_rx) = crossbeam_channel::bounded(EVENT_CAPACITY);
@@ -260,6 +261,25 @@ impl Vox {
     /// all subsequent tracks. Untagged tracks play at unity gain.
     pub fn set_replaygain(&self, mode: ReplayGainMode) {
         self.dispatch(VoxCommand::ReplayGain(mode));
+    }
+
+    /// Sets the output volume on a perceptual scale, clamped to `0.0..=1.2`.
+    ///
+    /// `0.0` is silence, `1.0` is unity (unchanged), and values up to `1.2`
+    /// amplify (which may clip). The scale is perceptual — a square-law taper is
+    /// applied internally so equal steps sound like equal loudness changes.
+    ///
+    /// Takes effect immediately, even while paused, and is smoothed over a few
+    /// milliseconds to avoid clicks. The volume also scales the visualization
+    /// [tap](Self::take_tap), so meters and scopes reflect the audible output.
+    pub fn set_volume(&self, volume: f32) {
+        self.state.set_volume(volume);
+    }
+
+    /// Returns the current volume on the perceptual `0.0..=1.2` scale — the last
+    /// value passed to [`set_volume`](Self::set_volume) (clamped). Defaults to `1.0`.
+    pub fn volume(&self) -> f32 {
+        self.state.volume()
     }
 
     /// Takes the visualization tap as a standalone [`TapHandle`].
@@ -737,6 +757,40 @@ mod tests {
         assert!(
             (7.9..8.2).contains(&pos),
             "second seek: expected ~8.0, got {pos}"
+        );
+    }
+
+    #[test]
+    fn natural_eos_plays_out_the_tail() {
+        // At natural end of stream, TrackEnded must not fire until the ring's
+        // buffered tail has played out — previously stop_playback deactivated
+        // immediately and the callback's stopped-state drain discarded up to
+        // buffer_ms (~150ms) of real audio.
+        let (v, events) = fresh_vox();
+        let started = Instant::now();
+        v.play("tests/test_suite/sine.flac").unwrap();
+
+        let e = await_event_ignoring_device(&events);
+        assert!(matches!(e, Some(VoxEvent::TrackStarted { .. })));
+        let duration = v.duration().as_secs_f64();
+        assert!(duration > 0.5, "fixture too short to measure: {duration}");
+
+        loop {
+            match events.recv_timeout(Duration::from_secs(10)) {
+                // A rebind legitimately bails the playout wait — skip the run.
+                Some(VoxEvent::DeviceChanged { .. }) => return,
+                Some(VoxEvent::TrackEnded {
+                    reason: EndReason::EndOfStream,
+                    ..
+                }) => break,
+                Some(_) => continue,
+                None => panic!("no TrackEnded within timeout"),
+            }
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        assert!(
+            elapsed >= duration - 0.05,
+            "TrackEnded fired {elapsed:.3}s after play; duration is {duration:.3}s — tail was cut"
         );
     }
 

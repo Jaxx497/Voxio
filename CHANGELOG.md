@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2] - Volume Adjusters
+### Added:
+  - Volume adjustment
+  - Enhanced device recovery logic
+
+### Changed: 
+  - Bumped crossbeam-channel version
+
 ## [0.2.1] - Decoder Improvements + Waveform Module
 
 *Lots of little tunings + a new waveform bins generation feature*

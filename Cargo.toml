@@ -1,6 +1,6 @@
 [package]
 name = "voxio"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Jaxx497"]
@@ -13,7 +13,7 @@ exclude = ["tests/"]
 
 [dependencies]
 cpal =  "0.18.1" 
-crossbeam-channel = "0.5.15"
+crossbeam-channel = "0.5.16"
 rtrb = "0.3.4"
 rubato = "3.0.0"
 symphonia = { version = "0.6.0", features = [ "aac", "aiff", "alac", "isomp4", "mp3" ] }

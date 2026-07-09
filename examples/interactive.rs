@@ -6,6 +6,8 @@
 //!   space  toggle playback (replays the track if playback has stopped)
 //!   n      seek forward 5s
 //!   p      seek backward 5s
+//!   ↑/+    volume up
+//!   ↓/-    volume down
 //!   s      stop playback
 //!   q/Esc  quit
 //!
@@ -14,8 +16,9 @@
 
 use std::collections::VecDeque;
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     cursor,
@@ -26,6 +29,8 @@ use crossterm::{
 use voxio::{TapHandle, Vox};
 
 const SEEK_STEP: f64 = 5.0;
+const VOLUME_STEP: f32 = 0.05;
+const VOLUME_MAX: f32 = 1.2; // matches Vox::set_volume's clamp ceiling
 const LOG_LINES: usize = 10;
 const BAR_WIDTH: usize = 40;
 
@@ -33,6 +38,22 @@ fn main() -> io::Result<()> {
     let path = env::args()
         .nth(1)
         .unwrap_or_else(|| "tests/test_suite/Preludes, Op. 28 - No. 16 'Hades'.mp3".to_string());
+
+    // Capture panics from any thread (engine threads run in the background) before
+    // the alternate screen eats them: restore the terminal and persist to a file.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), cursor::Show, terminal::LeaveAlternateScreen);
+        let _ = terminal::disable_raw_mode();
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("voxio_panic.log")
+        {
+            let _ = writeln!(f, "PANIC: {info}");
+        }
+        default_hook(info);
+    }));
 
     let (mut vox, events) = Vox::new().expect("failed to start engine");
     let mut tap = vox.take_tap().expect("tap handle");
@@ -56,6 +77,16 @@ fn run(
 ) -> io::Result<()> {
     let mut log: VecDeque<String> = VecDeque::new();
     let mut out = io::stdout();
+
+    // Durable event log — the TUI pane scrolls unplug-bursts off-screen. Truncated each run.
+    const LOG_PATH: &str = "voxio_events.log";
+    let mut logfile = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(LOG_PATH)
+        .ok();
+    let start = Instant::now();
 
     loop {
         // Keyboard input
@@ -84,6 +115,12 @@ fn run(
                 KeyCode::Char('p') => {
                     vox.seek_relative(-SEEK_STEP);
                 }
+                KeyCode::Up | KeyCode::Char('+') | KeyCode::Char('=') => {
+                    vox.set_volume(vox.volume() + VOLUME_STEP);
+                }
+                KeyCode::Down | KeyCode::Char('-') | KeyCode::Char('_') => {
+                    vox.set_volume(vox.volume() - VOLUME_STEP);
+                }
                 KeyCode::Char('s') => {
                     vox.stop();
                 }
@@ -91,9 +128,14 @@ fn run(
             }
         }
 
-        // Engine events → log pane
+        // Engine events → log pane (and durable log file)
         while let Some(event) = events.try_recv() {
-            log.push_back(format!("{event:?}"));
+            let line = format!("{event:?}");
+            if let Some(f) = logfile.as_mut() {
+                let _ = writeln!(f, "[{:9.3}s] {line}", start.elapsed().as_secs_f64());
+                let _ = f.flush();
+            }
+            log.push_back(line);
             if log.len() > LOG_LINES {
                 log.pop_front();
             }
@@ -132,18 +174,27 @@ fn draw(
         .map(|i| if i < lit { '▮' } else { '·' })
         .collect();
 
+    // Volume knob, scaled across the 0..=VOLUME_MAX range
+    let volume = vox.volume();
+    let knob_at = ((volume / VOLUME_MAX) * BAR_WIDTH as f32).round() as usize;
+    let knob: String = (0..BAR_WIDTH)
+        .map(|i| if i == knob_at { '●' } else { '─' })
+        .collect();
+
     execute!(out, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
     write!(
         out,
-        "voxio interactive — space: play/pause  n: +5s  p: -5s  s: stop  q: quit\r\n\
+        "voxio interactive — space: play/pause  n/p: seek  ↑/↓: volume  s: stop  q: quit\r\n\
          \r\n\
          [{state}]  {bar}  {pos:6.1}s / {dur:.1}s\r\n\
          level    {meter}\r\n\
+         volume   {knob}  {vol_pct:3.0}%\r\n\
          output   {} Hz, {} ch\r\n\
          \r\n\
          events:\r\n",
         vox.sample_rate(),
         vox.channels(),
+        vol_pct = volume * 100.0,
     )?;
     for line in log {
         write!(out, "  {line}\r\n")?;

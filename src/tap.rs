@@ -81,6 +81,9 @@ impl TapHandle {
 
     /// Returns up to `amount` of the most recent interleaved output samples.
     ///
+    /// These are the samples as sent to the device, so they reflect the current
+    /// output volume — a meter or scope built on this tap tracks audible level.
+    ///
     /// Oldest samples are dropped first when the tap overflows. The returned
     /// slice borrows an internal buffer and is valid until the next call.
     pub fn latest(&mut self, amount: usize) -> &[f32] {

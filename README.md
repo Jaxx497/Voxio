@@ -10,7 +10,7 @@
 ---
 
 Originally designed as the tailor-made backend for
-[Noctavox](https://crates.io/crates/noctavox) (a TUI music player), Voxio is a
+[Noctavox](https://github.com/Jaxx497/NoctaVox/) (a TUI music player), Voxio is a
 batteries-included audio playback library for Rust applications. Built to be
 responsive, lightweight, dependable, and simple.
 
@@ -32,6 +32,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     vox.play("track.mp3")?;
     vox.set_next("track2.flac")?; // Prime next track for gapless transition
 
+    while vox.is_active() {
+        std::thread::sleep(Duration::from_millis(50))
+    }
+
+    // For users who want more integration with the player, use the event system
     while let Some(event) = events.recv_active(Duration::from_millis(50)) {
         match event {
             VoxEvent::TrackStarted { path, .. } => println!("Now playing: {}", path.display()),

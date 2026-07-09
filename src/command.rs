@@ -539,40 +539,38 @@ impl VoxWorker {
     }
 
     fn decode_handler(&mut self) -> Result<()> {
-        let Some(decoder) = self.current.as_mut() else {
+        // Field-level borrows so the decoded slice (borrowing `current`) can
+        // feed `pending`/`producer` directly, with no per-packet Vec copy.
+        let (in_ch, out_ch, gain) = (self.input_channels, self.output_channels, self.gain);
+        let Self {
+            current,
+            resampler,
+            pending,
+            producer,
+            state,
+            ..
+        } = self;
+        let Some(decoder) = current.as_mut() else {
             return Ok(());
         };
-        let packet = decoder.next_packet().map(|opt| opt.map(|s| s.to_vec()));
 
-        match packet? {
-            Some(s) => self.process_samples(&s),
-            None => self.handle_track_end(),
-        }
-    }
-
-    fn process_samples(&mut self, samples: &[f32]) -> Result<()> {
-        match &mut self.resampler {
-            Some(r) => {
-                self.pending.extend_from_slice(samples);
-                let producer = &mut self.producer;
-                let state = &self.state;
-                let in_ch = self.input_channels;
-                let out_ch = self.output_channels;
-                let gain = self.gain;
-                r.process(&mut self.pending, |s| {
-                    push_samples_mapped(producer, state, s, in_ch, out_ch, gain)
-                })?;
+        let ended = match decoder.next_packet()? {
+            Some(samples) => {
+                match resampler {
+                    Some(r) => {
+                        pending.extend_from_slice(samples);
+                        r.process(pending, |s| {
+                            push_samples_mapped(producer, state, s, in_ch, out_ch, gain)
+                        })?;
+                    }
+                    None => push_samples_mapped(producer, state, samples, in_ch, out_ch, gain),
+                }
+                false
             }
-            None => push_samples_mapped(
-                &mut self.producer,
-                &self.state,
-                samples,
-                self.input_channels,
-                self.output_channels,
-                self.gain,
-            ),
-        }
-        Ok(())
+            None => true,
+        };
+
+        if ended { self.handle_track_end() } else { Ok(()) }
     }
 
     /// At end of stream, reconcile the reported duration against what actually
@@ -607,6 +605,7 @@ impl VoxWorker {
             }
             None => {
                 self.flush_resampler()?;
+                self.await_ring_playout();
                 if let Some(path) = ended {
                     self.emit(VoxEvent::TrackEnded {
                         path,
@@ -674,43 +673,65 @@ impl VoxWorker {
         self.wait_for_seek_drain();
 
         let target = (self.output_rate as usize * self.output_channels * SEEK_PREFILL_MS) / 1000;
-        let mut prefilled = 0;
+        let (in_ch, out_ch, gain) = (self.input_channels, self.output_channels, self.gain);
+        let Self {
+            current,
+            resampler,
+            pending,
+            producer,
+            ..
+        } = self;
+        let Some(decoder) = current.as_mut() else {
+            return Ok(());
+        };
 
+        let mut prefilled = 0;
         while prefilled < target {
-            let Some(decoder) = self.current.as_mut() else {
+            let Some(samples) = decoder.next_packet()? else {
                 break;
             };
-
-            let packet = decoder.next_packet()?.map(|s| s.to_vec());
-
-            match packet {
-                Some(samples) => match &mut self.resampler {
-                    Some(r) => {
-                        self.pending.extend_from_slice(&samples);
-                        let producer = &mut self.producer;
-                        let in_ch = self.input_channels;
-                        let out_ch = self.output_channels;
-                        let gain = self.gain;
-                        let mut local = 0;
-                        r.process(&mut self.pending, |s| {
-                            local += push_samples_mapped_count(producer, s, in_ch, out_ch, gain);
-                        })?;
-                        prefilled += local;
-                    }
-                    None => {
-                        prefilled += push_samples_mapped_count(
-                            &mut self.producer,
-                            &samples,
-                            self.input_channels,
-                            self.output_channels,
-                            self.gain,
-                        );
-                    }
-                },
-                None => break,
+            match resampler {
+                Some(r) => {
+                    pending.extend_from_slice(samples);
+                    let mut local = 0;
+                    r.process(pending, |s| {
+                        local += push_samples_mapped_count(producer, s, in_ch, out_ch, gain);
+                    })?;
+                    prefilled += local;
+                }
+                None => {
+                    prefilled += push_samples_mapped_count(producer, samples, in_ch, out_ch, gain);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Let the callback play out the buffered tail before deactivating —
+    /// otherwise the stopped-state drain discards up to the full ring
+    /// (~buffer_ms) of real audio at natural end of stream. Only the no-next
+    /// EOS path waits; interrupts and failures keep their immediate cut, and
+    /// gapless handoffs never come through here. Bails early on shutdown,
+    /// rebuild, a pending command or binding (interrupts stay responsive), or
+    /// a dead callback (deadline = ring length + margin).
+    fn await_ring_playout(&self) {
+        let sps = self.output_rate as u64 * self.output_channels as u64;
+        if sps == 0 {
+            return;
+        }
+        let capacity = self.producer.buffer().capacity();
+        let deadline = Instant::now() + Duration::from_millis(capacity as u64 * 1000 / sps + 250);
+        while self.producer.slots() < capacity {
+            if self.state.is_shutdown()
+                || self.state.is_rebuilding()
+                || !self.rx.is_empty()
+                || !self.bindings.is_empty()
+                || Instant::now() >= deadline
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// Wait for audio callback to drain stale pre-seek audio.
@@ -752,6 +773,30 @@ fn get_mapped_sample(samples: &[f32], frame: usize, out_ch: usize, in_ch: usize)
     }
 }
 
+/// Channel-mapped, gain-scaled output samples starting at output index `start`,
+/// advanced by a frame/channel cursor: one div/mod at construction rather than
+/// per sample. Unbounded — the caller must `take` no more than
+/// `frames * out_ch - start` or the sample lookup goes out of bounds.
+fn mapped_samples(
+    samples: &[f32],
+    start: usize,
+    in_ch: usize,
+    out_ch: usize,
+    gain: f32,
+) -> impl Iterator<Item = f32> + '_ {
+    let mut frame = start / out_ch;
+    let mut out_c = start % out_ch;
+    std::iter::from_fn(move || {
+        let s = get_mapped_sample(samples, frame, out_c, in_ch) * gain;
+        out_c += 1;
+        if out_c == out_ch {
+            out_c = 0;
+            frame += 1;
+        }
+        Some(s)
+    })
+}
+
 /// Push samples to producer with channel mapping.
 /// Bails during shutdown.
 fn push_samples_mapped(
@@ -778,12 +823,7 @@ fn push_samples_mapped(
         }
         let n = (total_out - written).min(available);
         if let Ok(chunk) = producer.write_chunk_uninit(n) {
-            let start = written;
-            chunk.fill_from_iter((start..start + n).map(|idx| {
-                let frame = idx / out_ch;
-                let out_c = idx % out_ch;
-                get_mapped_sample(samples, frame, out_c, in_ch) * gain
-            }));
+            chunk.fill_from_iter(mapped_samples(samples, written, in_ch, out_ch, gain).take(n));
         }
         written += n;
     }
@@ -805,11 +845,7 @@ fn push_samples_mapped_count(
     }
     let to_write = total_out.min(available);
     if let Ok(chunk) = producer.write_chunk_uninit(to_write) {
-        chunk.fill_from_iter((0..to_write).map(|idx| {
-            let frame = idx / out_ch;
-            let out_c = idx % out_ch;
-            get_mapped_sample(samples, frame, out_c, in_ch) * gain
-        }));
+        chunk.fill_from_iter(mapped_samples(samples, 0, in_ch, out_ch, gain).take(to_write));
     }
     to_write
 }

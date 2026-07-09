@@ -11,14 +11,21 @@ use cpal::{
 use crossbeam_channel::{Receiver, Sender};
 use rtrb::{Producer, RingBuffer};
 use std::{
+    panic::{self, AssertUnwindSafe},
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
 };
 
 const SEEK_FADE_MS: usize = 30;
-/// How long the supervisor waits between rebuild attempts while the device is lost.
-const REBUILD_RETRY: Duration = Duration::from_millis(500);
+/// One-pole smoothing time for volume changes. Long enough that a slider drag
+/// can't click, short enough to feel responsive.
+const VOLUME_RAMP_MS: f32 = 15.0;
+/// Retry backoff while the device is lost: start fast (a changed device usually
+/// settles in a few hundred ms), double up to a gentle cap (don't hammer
+/// enumeration when it's truly gone).
+const REBUILD_RETRY_MIN: Duration = Duration::from_millis(50);
+const REBUILD_RETRY_MAX: Duration = Duration::from_millis(300);
 
 pub(crate) enum OutputControl {
     Rebuild(RebindReason),
@@ -51,23 +58,14 @@ pub(crate) fn spawn(
     tap_capacity: usize,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let host = cpal::default_host();
-
-        let (stream, info) = match install(
-            &host,
-            &state,
-            &ctrl_tx,
-            &bindings,
-            &taps,
-            buffer_ms,
-            tap_capacity,
-        ) {
-            Ok(built) => built,
-            Err(e) => {
-                let _ = init.send(Err(e));
-                return;
-            }
-        };
+        let (stream, info) =
+            match install_caught(&state, &ctrl_tx, &bindings, &taps, buffer_ms, tap_capacity) {
+                Ok(built) => built,
+                Err(e) => {
+                    let _ = init.send(Err(e));
+                    return;
+                }
+            };
         let _ = init.send(Ok(()));
 
         let mut current = Some(stream); // held only to keep the stream alive
@@ -75,11 +73,12 @@ pub(crate) fn spawn(
 
         while let Ok(msg) = ctrl.recv() {
             let OutputControl::Rebuild(reason) = msg else {
+                drop_stream(current.take());
                 return;
             };
 
             state.set_rebuilding(true);
-            current.take(); // drop old stream first; cpal joins its audio thread
+            drop_stream(current.take()); // drop old stream first; cpal joins its audio thread
 
             // Drain duplicate Rebuilds queued by the old stream's error callback
             // (it can fire repeatedly before the join completes). Stop at, never
@@ -90,17 +89,10 @@ pub(crate) fn spawn(
                 }
             }
 
-            let mut lost_announced = false;
+            let mut last_err: Option<String> = None;
+            let mut backoff = REBUILD_RETRY_MIN;
             loop {
-                match install(
-                    &host,
-                    &state,
-                    &ctrl_tx,
-                    &bindings,
-                    &taps,
-                    buffer_ms,
-                    tap_capacity,
-                ) {
+                match install_caught(&state, &ctrl_tx, &bindings, &taps, buffer_ms, tap_capacity) {
                     Ok((stream, info)) => {
                         state.set_rebuilding(false);
                         let _ = events.try_send(VoxEvent::DeviceChanged {
@@ -113,25 +105,49 @@ pub(crate) fn spawn(
                         current = Some(stream);
                         break;
                     }
-                    Err(_) => {
-                        // Announce loss once per episode, not per retry.
-                        if !lost_announced {
-                            let _ = events.try_send(VoxEvent::DeviceLost { name: name.clone() });
-                            lost_announced = true;
+                    Err(e) => {
+                        // Once per distinct reason (re-announce on change), not per
+                        // retry — surfaces a shifting failure without spamming.
+                        let msg = e.to_string();
+                        if last_err.as_deref() != Some(msg.as_str()) {
+                            let _ = events.try_send(VoxEvent::DeviceLost {
+                                name: name.clone(),
+                                error: msg.clone(),
+                            });
+                            last_err = Some(msg);
                         }
-                        if let Ok(OutputControl::Shutdown) = ctrl.recv_timeout(REBUILD_RETRY) {
+                        if let Ok(OutputControl::Shutdown) = ctrl.recv_timeout(backoff) {
                             return;
                         }
+                        backoff = (backoff * 2).min(REBUILD_RETRY_MAX);
                     }
                 }
             }
         }
+
+        // Control channel closed without a Shutdown (all senders dropped); guard
+        // this teardown too — cpal can panic dropping a stream on a gone device.
+        drop_stream(current.take());
     })
 }
 
-/// Build and start a stream, then ship the fresh ring buffer and tap to their owners.
-fn install(
-    host: &cpal::Host,
+/// Run `f`, catching panics, with the panic hook silenced for its duration.
+///
+/// cpal `.unwrap()`s WASAPI calls on a lost device. `catch_unwind` stops the crash
+/// but the hook still prints the backtrace first; we suppress it only for this
+/// build/teardown window, then restore the host app's hook.
+fn quietly<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
+    let prev = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(AssertUnwindSafe(f));
+    panic::set_hook(prev);
+    result
+}
+
+/// `install`, but a cpal stream-setup panic (it `.unwrap()`s WASAPI calls that fail
+/// once the device is gone) becomes a recoverable error — otherwise it unwinds the
+/// supervisor and ends all recovery. A caught panic just retries like any failed build.
+fn install_caught(
     state: &Arc<SharedState>,
     ctrl_tx: &Sender<OutputControl>,
     bindings: &Sender<AudioBinding>,
@@ -139,23 +155,76 @@ fn install(
     buffer_ms: usize,
     tap_capacity: usize,
 ) -> Result<(Stream, StreamInfo)> {
-    let (stream, binding, tap, info) = build_stream(host, state, ctrl_tx, buffer_ms, tap_capacity)?;
+    quietly(|| install(state, ctrl_tx, bindings, taps, buffer_ms, tap_capacity)).unwrap_or_else(
+        |_| {
+            Err(VoxError::Device(
+                "stream setup panicked (device lost)".into(),
+            ))
+        },
+    )
+}
+
+/// Drop a cpal stream without its teardown taking down the caller: `Stream::drop`
+/// `.unwrap()`s a `SetEvent` that returns `E_HANDLE` once the device is unplugged.
+/// We're discarding it anyway, so swallow the panic.
+fn drop_stream(stream: Option<Stream>) {
+    if let Some(s) = stream {
+        let _ = quietly(move || drop(s));
+    }
+}
+
+/// Resolve the system default output to a *concrete* enumerated device.
+///
+/// On Windows, cpal's `default_output_device()` is a virtual handle that activates via
+/// `ActivateAudioInterfaceAsync` — MTA-only, so it fails with `RPC_E_CHANGED_MODE` on
+/// cpal's STA threads and breaks rebuilds. A concrete enumerated device activates via
+/// STA-safe `IMMDevice::Activate`. We match the default by id; the watchdog covers
+/// default changes, so we don't need cpal's auto-rerouting. Falls back to the default.
+fn default_output_concrete(host: &cpal::Host) -> Result<cpal::Device> {
+    let default = host
+        .default_output_device()
+        .ok_or_else(|| VoxError::Device("no output device".into()))?;
+
+    let default_id = default.id().ok().map(|d| d.id().to_string());
+    if let Some(id) = default_id.as_deref()
+        && let Ok(devices) = host.output_devices()
+    {
+        for d in devices {
+            if d.id().ok().map(|x| x.id().to_string()).as_deref() == Some(id) {
+                return Ok(d);
+            }
+        }
+    }
+    Ok(default)
+}
+
+/// Build and start a stream, then ship the fresh ring buffer and tap to their owners.
+fn install(
+    state: &Arc<SharedState>,
+    ctrl_tx: &Sender<OutputControl>,
+    bindings: &Sender<AudioBinding>,
+    taps: &Sender<TapReader>,
+    buffer_ms: usize,
+    tap_capacity: usize,
+) -> Result<(Stream, StreamInfo)> {
+    let (stream, binding, tap, info) = build_stream(state, ctrl_tx, buffer_ms, tap_capacity)?;
     state.set_output_format(info.sample_rate, info.channels);
+    state.bump_rebuild_generation(); // lets the watchdog re-baseline post-rebuild
     let _ = taps.send(tap);
     let _ = bindings.send(binding);
     Ok((stream, info))
 }
 
 fn build_stream(
-    host: &cpal::Host,
     state: &Arc<SharedState>,
     ctrl_tx: &Sender<OutputControl>,
     buffer_ms: usize,
     tap_capacity: usize,
 ) -> Result<(Stream, AudioBinding, TapReader, StreamInfo)> {
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| VoxError::Device("no output device".into()))?;
+    // Fresh host per (re)build: a reused host can keep handing back a stale device
+    // snapshot, leaving the retry loop unable to recover. A fresh one re-enumerates.
+    let host = cpal::default_host();
+    let device = default_output_concrete(&host)?;
 
     let name = device
         .description()
@@ -179,6 +248,11 @@ fn build_stream(
     let mut was_seeking = false;
     let fade_total = output_rate as usize * output_channels * SEEK_FADE_MS / 1000;
     let mut fade_remaining: usize = 0;
+
+    // Per-sample one-pole toward the live target gain. Seed from the current
+    // volume so a rebuild mid-playback doesn't ramp up from silence.
+    let vol_coeff = 1.0 - (-1.0 / (output_rate as f32 * VOLUME_RAMP_MS / 1000.0)).exp();
+    let mut current_gain = state.volume_gain();
 
     let stream = device
         .build_output_stream(
@@ -214,6 +288,7 @@ fn build_stream(
                 }
                 was_seeking = is_seeking;
 
+                let target_gain = cb_state.volume_gain();
                 let available = consumer.slots();
                 let to_read = available.min(data.len());
                 if to_read > 0
@@ -227,6 +302,8 @@ fn build_stream(
                             sample *= progress;
                             fade_remaining -= 1;
                         }
+                        current_gain += (target_gain - current_gain) * vol_coeff;
+                        sample *= current_gain;
                         data[i] = sample;
                     }
                     chunk.commit_all();

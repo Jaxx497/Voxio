@@ -38,8 +38,9 @@ pub enum VoxEvent {
         channels: usize,
         reason: RebindReason,
     },
-    /// A rebuild failed; the engine keeps retrying.
-    DeviceLost { name: String },
+    /// A rebuild failed; the engine keeps retrying. `error` is the latest failure
+    /// reason, re-emitted whenever it changes across retries.
+    DeviceLost { name: String, error: String },
     /// Playback was paused or resumed.
     StateChanged { paused: bool },
 }
